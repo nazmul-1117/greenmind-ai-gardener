@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GreenMind AI Assistant</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- Load Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <!-- Load Firebase SDKs -->
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, collection, query, orderBy, addDoc, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        let GEMINIAPIKEY = null
+        let APIKEY = null
+        let AUTHDOMAIN = null
+        let PROJECTID = null
+        let STORAGEBUCKET = null
+        let MESSAGINGSENDERID = null
+        let APPID = null
+        let MEASUREMENTID = null
+
+        await fetch('secrets.json')
+            .then(res => res.json())
+            .then(config => {
+                GEMINIAPIKEY = config.gemini.apiKey;
+                APIKEY = config.firebase.apiKey;
+                AUTHDOMAIN = config.firebase.authDomain;
+                PROJECTID = config.firebase.projectId;
+                STORAGEBUCKET = config.firebase.storageBucket;
+                MESSAGINGSENDERID = config.firebase.messagingSenderId;
+                APPID = config.firebase.appId;
+                MEASUREMENTID = config.firebase.measurementId;
+            });
+
+        // Global variables must be defined here for access in the script scope
+        let db;
+        let auth;
+        let userId = 'loadding'; // Default placeholder until auth is ready
+
+        const LOCAL_FIREBASE_CONFIG = {
+            apiKey: APIKEY,
+            authDomain: AUTHDOMAIN,
+            projectId: PROJECTID,
+            storageBucket: STORAGEBUCKET,
+            messagingSenderId: MESSAGINGSENDERID,
+            appId: APPID,
+            measurementId: MEASUREMENTID
+        };
+
+        let appId = 'greenmind-local';
+        let firebaseConfig = LOCAL_FIREBASE_CONFIG;
+        let initialAuthToken = null;
+
+        // const app = initializeApp(LOCAL_FIREBASE_CONFIG);
+        console.log('Firebase Config: +d+d', firebaseConfig);
+
+        if (firebaseConfig) {
+            // Set Firebase log level to Debug for visibility in console
+            setLogLevel('Debug');
+
+            // const app = initializeApp(firebaseConfig);
+            const app = initializeApp(LOCAL_FIREBASE_CONFIG);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            // Authentication Listener
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                    initializeChat();
+                } else {
+                    // Sign in if not already authenticated
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            // Fallback to anonymous sign-in if token is missing (for local testing)
+                            console.log("No initial auth token found. Fallback to anonymous sign-in.");
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Firebase authentication failed:", error);
+                        document.getElementById('chat-messages').innerHTML = '<div class="text-red-500 p-4">Authentication Error. Check console for details.</div>';
+                    }
+                }
+            });
+        } else {
+            document.getElementById('chat-messages').innerHTML = '<div class="text-red-500 p-4">Firebase configuration is missing. Cannot run application.</div>';
+            console.error("FATAL ERROR: __firebase_config is not defined.");
+        }
+
+
+        // --- 2. CHAT HISTORY LISTENER (onSnapshot) ---
+
+        function initializeChat() {
+            const chatCollectionPath = `artifacts/${appId}/users/${userId}/chat_messages`;
+            const q = query(collection(db, chatCollectionPath), orderBy('timestamp', 'asc'));
+
+            onSnapshot(q, (snapshot) => {
+                const messages = [];
+                snapshot.forEach((doc) => {
+                    messages.push(doc.data());
+                });
+                renderMessages(messages);
+            }, (error) => {
+                console.error("Error listening to Firestore:", error);
+            });
+
+            // Re-enable form once initialized
+            document.getElementById('message-input').disabled = false;
+            document.getElementById('send-button').disabled = false;
+        }
+
+
+        // --- 3. UI RENDERING & SCROLLING ---
+
+        function renderMessages(messages) {
+            const chatWindow = document.getElementById('chat-messages');
+            chatWindow.innerHTML = ''; // Clear existing messages
+
+            messages.forEach(msg => {
+                const isUser = msg.sender === 'user';
+                const messageContainer = document.createElement('div');
+                messageContainer.className = `flex mb-4 ${isUser ? 'justify-end' : 'justify-start'}`;
+
+                let sourcesHtml = '';
+                if (!isUser && msg.sources && msg.sources.length > 0) {
+                    sourcesHtml = `<div class="mt-2 text-xs text-green-700/80 border-t border-green-200 pt-2">
+                        <p class="font-semibold mb-1">Grounding Sources:</p>
+                        ${msg.sources.map((source, index) =>
+                        `<a href="${source.uri || '#'}" target="_blank" class="block truncate hover:text-green-900" title="${source.title || 'Source'}">
+                                <span class="font-mono text-[10px] mr-1 opacity-70">(${index + 1})</span> ${source.title || 'External Link'}
+                            </a>`
+                    ).join('')}
+                    </div>`;
+                }
+
+
+                messageContainer.innerHTML = `
+                    <div class="max-w-3/4 p-4 rounded-xl shadow-md ${isUser
+                        ? 'bg-green-600 text-white rounded-br-none'
+                        : 'bg-white text-gray-800 rounded-tl-none border border-green-100'
+                    }">
+                        <div class="font-medium text-xs mb-1 ${isUser ? 'text-green-200' : 'text-green-500'}">
+                            ${isUser ? 'You' : 'GreenMind AI'}
+                        </div>
+                        <p class="whitespace-pre-wrap">${msg.text}</p>
+                        ${sourcesHtml}
+                    </div>
+                `;
+                chatWindow.appendChild(messageContainer);
+            });
+
+            // Auto-scroll to the latest message
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+
+
+        // --- 4. GEMINI API CALL (RAG Simulation) ---
+
+        async function callGeminiAPI(prompt) {
+            const apiKey = GEMINIAPIKEY;
+            
+            // Use gemini-2.5-flash-preview-09-2025 with Google Search grounding
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+            const systemPrompt = "You are GreenMind AI, an expert, encouraging, and highly factual agricultural advisor. Your advice must be strictly grounded in reliable, up-to-date information. If you use external data, you must cite the sources. Answer the user's agricultural query concisely and professionally, focusing on sustainable practices. Never use markdown headers or bolding.";
+
+            console.log("Prompt:", prompt);
+
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                tools: [{ "google_search": {} }], // Enable Google Search grounding (RAG Simulation)
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            const maxRetries = 3;
+            let response;
+
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        // Throw error to trigger retry logic
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+
+                    const candidate = result.candidates?.[0];
+                    if (candidate && candidate.content?.parts?.[0]?.text) {
+                        const text = candidate.content.parts[0].text;
+
+                        let sources = [];
+                        const groundingMetadata = candidate.groundingMetadata;
+                        if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                            sources = groundingMetadata.groundingAttributions
+                                .map(attribution => ({
+                                    uri: attribution.web?.uri,
+                                    title: attribution.web?.title,
+                                }))
+                                .filter(source => source.uri && source.title);
+                        }
+
+                        return { text, sources };
+                    } else {
+                        return { text: "I apologize, the model returned an empty response. Please try rephrasing your question.", sources: [] };
+                    }
+
+                } catch (error) {
+                    console.error(`Attempt ${i + 1} failed:`, error);
+                    if (i < maxRetries - 1) {
+                        // Exponential backoff: 1s, 2s, 4s
+                        const delay = Math.pow(2, i) * 1000;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    } else {
+                        // Max retries reached
+                        return { text: "I'm having trouble connecting right now. Please check your network or try again later.", sources: [] };
+                    }
+                }
+            }
+        }
+
+
+        // --- 5. SUBMIT HANDLER ---
+
+        document.getElementById('chat-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('message-input');
+            const button = document.getElementById('send-button');
+            const userPrompt = input.value.trim();
+
+            if (!userPrompt || userId === 'loading' || !db) return;
+
+            // 1. Save user message to Firestore
+            const chatCollectionPath = `artifacts/${appId}/users/${userId}/chat_messages`;
+            const userMessageRef = await addDoc(collection(db, chatCollectionPath), {
+                sender: 'user',
+                text: userPrompt,
+                timestamp: serverTimestamp(),
+            });
+
+            // Clear input and disable UI
+            input.value = '';
+            input.disabled = true;
+            button.disabled = true;
+
+
+            // Show loading indicator
+            const loadingIndicator = document.getElementById('loading-indicator');
+            loadingIndicator.classList.remove('hidden');
+
+            console.log("User Prompt X:", userPrompt);
+
+            // 2. Call the AI API (Simulated RAG)
+            const aiResponse = await callGeminiAPI(userPrompt);
+
+            // 3. Save AI message (with sources) to Firestore
+            await addDoc(collection(db, chatCollectionPath), {
+                sender: 'ai',
+                text: aiResponse.text,
+                sources: aiResponse.sources,
+                timestamp: serverTimestamp(),
+            });
+
+            // Re-enable UI and hide loading indicator
+            loadingIndicator.classList.add('hidden');
+            input.disabled = false;
+            button.disabled = false;
+            input.focus();
+        });
+    </script>
+
+    <style>
+        /* Custom styles for better scroll behavior and theme */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7fdee;
+            /* Very light green background */
+        }
+
+        .chat-window {
+            height: calc(100vh - 160px);
+            /* Adjust height for header and input */
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+
+        .message-input-area {
+            box-shadow: 0 -4px 6px -1px rgba(0, 0, 0, 0.05), 0 -2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        .ring-spin {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #10b981;
+            /* Emerald green */
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body class="min-h-screen flex flex-col antialiased">
+
+    <!-- Main Container -->
+    <div class="flex flex-col flex-1 w-full max-w-4xl mx-auto">
+
+        <!-- Header -->
+        <header class="p-4 bg-white shadow-md sticky top-0 z-10 border-b border-green-100">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center">
+                    <i class="ph-leaf text-green-600 text-3xl mr-2"></i>
+                    <h1 class="text-2xl font-bold text-green-700">GreenMind AI Assistant</h1>
+                </div>
+                <div class="text-xs text-gray-500 hidden sm:block" id="user-id-display">
+                    User ID: Loading...
+                </div>
+            </div>
+        </header>
+
+        <!-- Chat Window -->
+        <main id="chat-messages" class="chat-window p-4 flex-1 space-y-4"></main>
+
+        <!-- Input Area -->
+        <footer class="message-input-area bg-white p-4 sticky bottom-0 z-10">
+            <div class="w-full">
+                <!-- Loading Indicator -->
+                <div id="loading-indicator" class="hidden flex items-center justify-center p-2 mb-2 text-green-600">
+                    <div class="ring-spin mr-3"></div>
+                    <span class="text-sm font-medium">GreenMind is thinking... (Calling RAG Model)</span>
+                </div>
+
+                <form id="chat-form" class="flex items-center space-x-3">
+                    <input type="text" id="message-input"
+                        placeholder="Ask for advice on pest control, crop rotation, or soil health..."
+                        class="flex-1 p-3 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
+                        autocomplete="off" disabled>
+                    <button type="submit" id="send-button"
+                        class="p-3 bg-green-600 text-white rounded-xl shadow-lg hover:bg-green-700 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled>
+                        <i class="ph-paper-plane-right-fill text-xl"></i>
+                    </button>
+                </form>
+            </div>
+        </footer>
+    </div>
+
+</body>
+
+</html>
